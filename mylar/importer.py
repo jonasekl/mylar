@@ -296,7 +296,8 @@ def addComictoDB(comicid,mismatch=None,pullupd=None,imported=None,ogcname=None,c
                   '$series':        series.lower(),
                   '$publisher':     publisher.lower(),
                   '$VolumeY':       'V' + str(year),
-                  '$VolumeN':       comversion
+                  '$VolumeN':       comversion,
+                  '$Annual':        'Annual'
                   }
 
 
@@ -624,6 +625,8 @@ def addComictoDB(comicid,mismatch=None,pullupd=None,imported=None,ogcname=None,c
 #                        print "ai:"  + str(int_issnum)
                     elif 'inh' in issnum.lower():
                         int_issnum = (int(issnum[:-4]) * 1000) + ord('i') + ord('n') + ord('h')
+                    elif 'now' in issnum.lower():
+                        int_issnum = (int(issnum[:-4]) * 1000) + ord('n') + ord('o') + ord('w')
                     elif u'\xbd' in issnum:
                         issnum = .5
                         int_issnum = int(issnum) * 1000
@@ -1209,9 +1212,7 @@ def GCDimport(gcomicid, pullupd=None,imported=None,ogcname=None):
 def issue_collection(issuedata,nostatus):
     myDB = db.DBConnection()
 
-    logger.info('issue collection...')
     if issuedata:    
-        #logger.info('issuedata exists')
         for issue in issuedata:
 
 
@@ -1226,7 +1227,6 @@ def issue_collection(issuedata,nostatus):
 
 
             if nostatus == 'False':
-                #logger.info('issue')
                 # check if the issue already exists
                 iss_exists = myDB.action('SELECT * from issues WHERE IssueID=?', [issue['IssueID']]).fetchone()
 
