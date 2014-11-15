@@ -14,6 +14,9 @@ def Startit(searchName, searchIssue, searchYear, ComicVersion, IssDateFix):
     #searchName = "Uncanny Avengers"
     #searchIssue = "01"
     #searchYear = "2012"
+    if searchName.lower().startswith('the '):
+        searchName = searchName[4:]
+    cName = searchName
     #clean up searchName due to webparse.
     searchName = searchName.replace("%20", " ")
     if "," in searchName:
@@ -59,7 +62,8 @@ def Startit(searchName, searchIssue, searchYear, ComicVersion, IssDateFix):
         totNum = len(feed.entries)
         tallycount += len(feed.entries)
 
-        keyPair = {}
+        #keyPair = {}
+        keyPair = []
         regList = []
         countUp = 0
 
@@ -68,9 +72,13 @@ def Startit(searchName, searchIssue, searchYear, ComicVersion, IssDateFix):
         while countUp < totNum:
      	    urlParse = feed.entries[countUp].enclosures[0]
 	    #keyPair[feed.entries[countUp].title] = feed.entries[countUp].link
-	    keyPair[feed.entries[countUp].title] = urlParse["href"]
-
+	    #keyPair[feed.entries[countUp].title] = urlParse["href"]
+            keyPair.append({"title":     feed.entries[countUp].title,
+                            "link":      urlParse["href"],
+                            "length":    urlParse["length"],
+                            "pubdate":   feed.entries[countUp].updated})
     	    countUp=countUp+1
+        logger.fdebug('keypair: ' + str(keyPair))
 
 
         # thanks to SpammyHagar for spending the time in compiling these regEx's!
@@ -90,15 +98,16 @@ def Startit(searchName, searchIssue, searchYear, ComicVersion, IssDateFix):
 
         except_list=['releases', 'gold line', 'distribution', '0-day', '0 day']
 
-        for title, link in keyPair.items():
-            #logger.fdebug("titlesplit: " + str(title.split("\"")))
+        for entry in keyPair:
+            title = entry['title']
+            logger.fdebug("titlesplit: " + str(title.split("\"")))
             splitTitle = title.split("\"")
             noYear = 'False'
 
             for subs in splitTitle:
-                logger.fdebug(subs)
+                logger.fdebug('sub:' + subs)
                 regExCount = 0
-                if len(subs) > 10 and not any(d in subs.lower() for d in except_list):
+                if len(subs) >= len(cName) and not any(d in subs.lower() for d in except_list):
                 #Looping through dictionary to run each regEx - length + regex is determined by regexList up top.
 #                while regExCount < len(regexList):
 #                    regExTest = re.findall(regexList[regExCount], subs, flags=re.IGNORECASE)
@@ -109,6 +118,7 @@ def Startit(searchName, searchIssue, searchYear, ComicVersion, IssDateFix):
 #                                  'title':   subs,
 #                                  'link':    str(link)
 #                                  })
+                    logger.fdebug('match.')
                     if IssDateFix != "no":
                         if IssDateFix == "01" or IssDateFix == "02": ComicYearFix = str(int(searchYear) - 1)
                         else: ComicYearFix = str(int(searchYear) + 1)
@@ -128,8 +138,10 @@ def Startit(searchName, searchIssue, searchYear, ComicVersion, IssDateFix):
                     if noYear == 'False':
                         
                         entries.append({
-                                  'title':   subs,
-                                  'link':    str(link)
+                                  'title':     subs,
+                                  'link':      entry['link'],
+                                  'pubdate':   entry['pubdate'],
+                                  'length':    entry['length']
                                   })
                         break  # break out so we don't write more shit.
               
@@ -137,8 +149,6 @@ def Startit(searchName, searchIssue, searchYear, ComicVersion, IssDateFix):
     if tallycount >= 1:
         mres['entries'] = entries
         return mres 
-#       print("Title: "+regList[0])
-#       print("Link: "+keyPair[regList[0]])        
     else:
         logger.fdebug("No Results Found")
         return "no results"

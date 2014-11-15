@@ -21,6 +21,8 @@ import string
 import urllib
 import lib.feedparser
 import mylar
+from mylar.helpers import cvapi_check
+
 from bs4 import BeautifulSoup as Soup
 
 def pulldetails(comicid,type,issueid=None,offset=1):
@@ -29,25 +31,36 @@ def pulldetails(comicid,type,issueid=None,offset=1):
     #import easy to use xml parser called minidom:
     from xml.dom.minidom import parseString
 
-    comicapi='583939a3df0a25fc4e8b7a29934a13078002dc27'
+    if mylar.COMICVINE_API == 'None' or mylar.COMICVINE_API is None or mylar.COMICVINE_API == mylar.DEFAULT_CVAPI:
+        logger.warn('You have not specified your own ComicVine API key - alot of things will be limited. Get your own @ http://api.comicvine.com.')
+        comicapi = mylar.DEFAULT_CVAPI
+    else:
+        comicapi = mylar.COMICVINE_API
+
     if type == 'comic':
-        PULLURL= mylar.CVURL + 'volume/4050-' + str(comicid) + '/?api_key=' + str(comicapi) + '&format=xml&field_list=name,count_of_issues,issues,start_year,site_detail_url,image,publisher,description,first_issue'
+        if not comicid.startswith('4050-'): comicid = '4050-' + comicid
+        PULLURL= mylar.CVURL + 'volume/' + str(comicid) + '/?api_key=' + str(comicapi) + '&format=xml&field_list=name,count_of_issues,issues,start_year,site_detail_url,image,publisher,description,first_issue,deck,aliases'
     elif type == 'issue':
         if mylar.CV_ONLY:
             cv_type = 'issues'
             searchset = 'filter=volume:' + str(comicid) + '&field_list=cover_date,description,id,image,issue_number,name,date_last_updated,store_date'
         else:
             cv_type = 'volume/' + str(comicid)
-            searchset = 'name,count_of_issues,issues,start_year,site_detail_url,image,publisher,description'
+            searchset = 'name,count_of_issues,issues,start_year,site_detail_url,image,publisher,description,store_date'
         PULLURL = mylar.CVURL + str(cv_type) + '/?api_key=' + str(comicapi) + '&format=xml&' + str(searchset) + '&offset=' + str(offset)
     elif type == 'firstissue':
         #this is used ONLY for CV_ONLY
         PULLURL = mylar.CVURL + 'issues/?api_key=' + str(comicapi) + '&format=xml&filter=id:' + str(issueid) + '&field_list=cover_date'
     elif type == 'storyarc':
-       PULLURL =  mylar.CVURL + 'story_arc/?api_key=' + str(comicapi) + '&format=xml&filter=id:' + str(issueid) + '&field_list=cover_date'
+       PULLURL =  mylar.CVURL + 'story_arcs/?api_key=' + str(comicapi) + '&format=xml&filter=name:' + str(issueid) + '&field_list=cover_date'
 
+    #CV API Check here.
+    if mylar.CVAPI_COUNT == 0 or mylar.CVAPI_COUNT >= mylar.CVAPI_MAX:
+        cvapi_check()
     #download the file:
     file = urllib2.urlopen(PULLURL)
+    #increment CV API counter.
+    mylar.CVAPI_COUNT +=1
     #convert to string:
     data = file.read()
     #close file because we dont need it anymore:
@@ -58,7 +71,7 @@ def pulldetails(comicid,type,issueid=None,offset=1):
     return dom
 
 
-def getComic(comicid,type,issueid=None):
+def getComic(comicid,type,issueid=None,arc=None):
     if type == 'issue': 
         offset = 1
         issue = {}
@@ -98,6 +111,9 @@ def getComic(comicid,type,issueid=None):
     elif type == 'firstissue': 
         dom = pulldetails(comicid,'firstissue',issueid,1)
         return GetFirstIssue(issueid,dom)
+    elif type == 'storyarc':
+        dom = pulldetails(arc,'storyarc',None,1)   
+        return GetComicInfo(issueid,dom)
 
 def GetComicInfo(comicid,dom):
 
@@ -124,57 +140,138 @@ def GetComicInfo(comicid,dom):
     cntit = int(cntit)
     #retrieve the first xml tag (<tag>data</tag>)
     #that the parser finds with name tagName:
-    comic['ComicName'] = dom.getElementsByTagName('name')[trackcnt+1].firstChild.wholeText
-    comic['ComicName'] = comic['ComicName'].rstrip() 
+    # to return the parent name of the <name> node : dom.getElementsByTagName('name')[0].parentNode.nodeName
+    # where [0] denotes the number of the name field(s)
+    # where nodeName denotes the parentNode : ComicName = results, publisher = publisher, issues = issue
+    try:
+        names = len( dom.getElementsByTagName('name') )
+        n = 0
+        while ( n < names ):
+            if dom.getElementsByTagName('name')[n].parentNode.nodeName == 'results':
+                try:
+                    comic['ComicName'] = dom.getElementsByTagName('name')[n].firstChild.wholeText
+                    comic['ComicName'] = comic['ComicName'].rstrip() 
+                except:
+                    logger.error('There was a problem retrieving the given data from ComicVine. Ensure that www.comicvine.com is accessible AND that you have provided your OWN ComicVine API key.')
+                    return
+
+            elif dom.getElementsByTagName('name')[n].parentNode.nodeName == 'publisher':
+                try:
+                    comic['ComicPublisher'] = dom.getElementsByTagName('name')[n].firstChild.wholeText
+                except:
+                    comic['ComicPublisher'] = "Unknown"
+
+            n+=1  
+    except:
+        logger.warn('Something went wrong retrieving from ComicVine. Ensure your API is up-to-date and that comicvine is accessible')
+        return
+
     try:
         comic['ComicYear'] = dom.getElementsByTagName('start_year')[0].firstChild.wholeText
     except:
         comic['ComicYear'] = '0000'
     comic['ComicURL'] = dom.getElementsByTagName('site_detail_url')[trackcnt].firstChild.wholeText
+
+    desdeck = 0
     #the description field actually holds the Volume# - so let's grab it
     try:
         descchunk = dom.getElementsByTagName('description')[0].firstChild.wholeText
-        comic['ComicDescription'] = drophtml(descchunk)
+        comic_desc = drophtml(descchunk)
+        desdeck +=1
     except:
-        comic['ComicDescription'] = 'None'
-    #extract the first 60 characters
-    comicDes = comic['ComicDescription'][:60]
-    if 'volume' in comicDes.lower():
-        #found volume - let's grab it.
-        v_find = comicDes.lower().find('volume')
-        #arbitrarily grab the next 10 chars (6 for volume + 1 for space + 3 for the actual vol #)
-        #increased to 10 to allow for text numbering (+5 max)
-        vfind = comicDes[v_find:v_find+15]
-        volconv = ''
-        basenums = {'zero':'0','one':'1','two':'2','three':'3','four':'4','five':'5','six':'6','seven':'7','eight':'8'}
-        for nums in basenums:
-            if nums in vfind.lower():
-                sconv = basenums[nums]
-                volconv = re.sub(nums, sconv, vfind.lower())
-                break        
-        if volconv != '':
-            vfind = volconv
-        if '(' in vfind:
-            #bracket detected in versioning'
-            vfindit = re.findall('[^()]+', vfind)
-            vfind = vfindit[0]
-        vf = re.findall('[^<>]+', vfind)
-        comic['ComicVersion'] = re.sub("[^0-9]", "", vf[0])
-    
-        logger.info("Volume information found! Adding to series record : volume " + comic['ComicVersion'])
-    else:
-        comic['ComicVersion'] = "noversion"
+        comic_desc = 'None'
+
+    #sometimes the deck has volume labels
+    try:
+        deckchunk = dom.getElementsByTagName('deck')[0].firstChild.wholeText
+        comic_deck = deckchunk
+        desdeck +=1
+    except:
+        comic_deck = 'None'
+
+    try:
+        comic['Aliases'] = dom.getElementsByTagName('aliases')[0].firstChild.wholeText
+        #logger.fdebug('Aliases: ' + str(aliases))
+    except:
+        comic['Aliases'] = 'None'
+
+    comic['ComicVersion'] = 'noversion'
+    #logger.info('comic_desc:' + comic_desc)
+    #logger.info('comic_deck:' + comic_deck)
+    #logger.info('desdeck: ' + str(desdeck))
+    while (desdeck > 0):
+        if desdeck == 1:
+            if comic_desc == 'None':
+                comicDes = comic_deck[:30]
+            else:
+                #extract the first 60 characters
+                comicDes = comic_desc[:60].replace('New 52', '')
+        elif desdeck == 2:
+            #extract the characters from the deck
+            comicDes = comic_deck[:30].replace('New 52', '')
+        else:
+            break
+
+        i = 0
+        while (i < 2):
+            if 'volume' in comicDes.lower():
+                #found volume - let's grab it.
+                v_find = comicDes.lower().find('volume')
+                #arbitrarily grab the next 10 chars (6 for volume + 1 for space + 3 for the actual vol #)
+                #increased to 10 to allow for text numbering (+5 max)
+                #sometimes it's volume 5 and ocassionally it's fifth volume.
+                if i == 0:
+                    vfind = comicDes[v_find:v_find+15]   #if it's volume 5 format
+                    basenums = {'zero':'0','one':'1','two':'2','three':'3','four':'4','five':'5','six':'6','seven':'7','eight':'8','nine':'9','ten':'10','i':'1','ii':'2','iii':'3','iv':'4','v':'5'}
+                    logger.fdebug('volume X format - ' + str(i) + ': ' + vfind)
+                else:
+                    vfind = comicDes[:v_find]   # if it's fifth volume format
+                    basenums = {'zero':'0','first':'1','second':'2','third':'3','fourth':'4','fifth':'5','sixth':'6','seventh':'7','eighth':'8','nineth':'9','tenth':'10','i':'1','ii':'2','iii':'3','iv':'4','v':'5'}
+                    logger.fdebug('X volume format - ' + str(i) + ': ' + vfind)
+                volconv = ''
+                for nums in basenums:
+                    if nums in vfind.lower():
+                        sconv = basenums[nums]
+                        vfind = re.sub(nums, sconv, vfind.lower())
+                        break        
+                #logger.info('volconv: ' + str(volconv))
+
+                #now we attempt to find the character position after the word 'volume'
+                if i == 0:
+                    volthis = vfind.lower().find('volume')
+                    volthis = volthis + 6 # add on the actual word to the position so that we can grab the subsequent digit
+                    vfind = vfind[volthis:volthis+4] #grab the next 4 characters ;)
+                elif i == 1:
+                    volthis = vfind.lower().find('volume')
+                    vfind = vfind[volthis-4:volthis] #grab the next 4 characters ;)
+
+                if '(' in vfind:
+                    #bracket detected in versioning'
+                    vfindit = re.findall('[^()]+', vfind)
+                    vfind = vfindit[0]
+                vf = re.findall('[^<>]+', vfind)
+                ledigit = re.sub("[^0-9]", "", vf[0])
+                if ledigit != '':
+                    comic['ComicVersion'] = ledigit
+                    logger.fdebug("Volume information found! Adding to series record : volume " + comic['ComicVersion'])
+                    break
+                i+=1
+            else:
+                i+=1
+
+        if comic['ComicVersion'] == 'noversion':
+            logger.fdebug('comic[ComicVersion]:' + str(comic['ComicVersion']))
+            desdeck -=1
+        else:
+            break
 
     if vari == "yes": 
         comic['ComicIssues'] = str(cntit)
     else:
         comic['ComicIssues'] = dom.getElementsByTagName('count_of_issues')[0].firstChild.wholeText
-    comic['ComicImage'] = dom.getElementsByTagName('super_url')[0].firstChild.wholeText
 
-    try:
-        comic['ComicPublisher'] = dom.getElementsByTagName('name')[trackcnt+2].firstChild.wholeText
-    except:
-        comic['ComicPublisher'] = "Unknown"
+    comic['ComicImage'] = dom.getElementsByTagName('super_url')[0].firstChild.wholeText
+    comic['ComicImageALT'] = dom.getElementsByTagName('small_url')[0].firstChild.wholeText
 
     comic['FirstIssueID'] = dom.getElementsByTagName('id')[0].firstChild.wholeText
 
@@ -235,11 +332,20 @@ def GetIssuesInfo(comicid,dom):
                 tempissue['CoverDate'] = subtrack.getElementsByTagName('cover_date')[0].firstChild.wholeText
             except:
                 tempissue['CoverDate'] = '0000-00-00'
-            tempissue['Issue_Number'] = subtrack.getElementsByTagName('issue_number')[0].firstChild.wholeText
+            try:
+                tempissue['StoreDate'] = subtrack.getElementsByTagName('store_date')[0].firstChild.wholeText
+            except:
+                tempissue['StoreDate'] = '0000-00-00'
+            try:
+                tempissue['Issue_Number'] = subtrack.getElementsByTagName('issue_number')[0].firstChild.wholeText
+            except:
+                logger.fdebug('No Issue Number available - Trade Paperbacks, Graphic Novels and Compendiums are not supported as of yet.')
             issuech.append({
+                'Comic_ID':                comicid,
                 'Issue_ID':                tempissue['Issue_ID'],
                 'Issue_Number':            tempissue['Issue_Number'],
                 'Issue_Date':              tempissue['CoverDate'],
+                'Store_Date':              tempissue['StoreDate'],
                 'Issue_Name':              tempissue['Issue_Name']
                 })
 

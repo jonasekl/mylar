@@ -36,21 +36,21 @@
 		%for future in futureresults:
 			<tr>
                                 %if pullfilter is True:
-                                        <td class="publishdate">${future['SHIPDATE']}</td>
-                                        <td class="publisher">${future['PUBLISHER']}</td>
-				        <td class="comicname">${future['COMIC']}
+                                        <td id="publishdate">${future['SHIPDATE']}</td>
+                                        <td id="publisher">${future['PUBLISHER']}</td>
+				        <td id="comicname">${future['COMIC']}
                                         %if future['EXTRA'] != '':
                                              (${future['EXTRA']})
                                         %endif
                                         </td>
-                                        <td class="comicnumber">${future['ISSUE']}</td>
-          				<td class="status">${future['STATUS']}
+                                        <td id="comicnumber">${future['ISSUE']}</td>
+          				<td id="status">${future['STATUS']}
                                         %if future['STATUS'] == 'Wanted':
                                              <a href="unqueueissue?IssueID=None&ComicID=${future['COMICID']}&ComicName=${future['COMIC'] | u}&Issue=${future['ISSUE']}&FutureID=${future['FUTUREID']}"><span class="ui-icon ui-icon-plus"></span>UnWant</a>
                                         %elif future['STATUS'] == 'Skipped':
                                              <a href="searchit?name=${future['COMIC'] | u}&issue=${future['ISSUE']}&mode=pullseries"><span class="ui-icon ui-icon-plus"></span>add series</a>
                                              <a href="queueissue?ComicName=${future['COMIC'] | u}&ComicIssue=${future['ISSUE']}&mode=pullwant"><span class="ui-icon ui-icon-plus"></span>one off</a>
-                                             <a href="add2futurewatchlist?ComicName=${future['COMIC'] | u}&Issue=${future['ISSUE']}&Publisher=${future['PUBLISHER']}&ShipDate=${future['SHIPDATE']}&FutureID=${future['FUTUREID']}"><span class="ui-icon ui-icon-plus"></span>Watch For</a>
+                                             <a href="#" onclick="doAjaxCall('add2futurewatchlist?ComicName=${future['COMIC'] |u}&Issue=${future['ISSUE']}&Publisher=${future['PUBLISHER']}}&ShipDate=${future['SHIPDATE']}&FutureID=${future['FUTUREID']}', $(this), 'table')" data-success="Adding ${future['COMIC']} Issue: ${future['ISSUE']} to Upcoming Watchlist"><span class="ui-icon ui-icon-plus"></span>Watch For</a>
                                         %endif
                                         </td>
                                 %endif

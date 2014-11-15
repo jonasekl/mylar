@@ -21,7 +21,7 @@ from mylar import logger, version
 import lib.simplejson as simplejson
 
 user = "evilhero"
-branch = "development"
+branch = "master"
 
 def runGit(args):
 
@@ -87,7 +87,7 @@ def getVersion():
         cur_commit_hash = output.strip()
         
         if not re.match('^[a-z0-9]+$', cur_commit_hash):
-            logger.error('Output doesn\'t look like a hash, not using it')
+            logger.error('Output does not look like a hash, not using it')
             return None
             
         return cur_commit_hash

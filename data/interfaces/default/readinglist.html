@@ -46,7 +46,7 @@
                     <tbody>
                          %for issue in issuelist:
                               <tr>
-                                <td id="comicname"><a href="artistPage?ComicID=${issue['ComicID']}">${issue['ComicName']} (${issue['SeriesYear']})</td>
+                                <td id="comicname"><a href="comicDetails?ComicID=${issue['ComicID']}">${issue['ComicName']} (${issue['SeriesYear']})</td>
                                 <td id="issue">${issue['Issue_Number']}</td>
                                 <td id="issueyear">${issue['IssueDate']}</td>
                                 <td id="status">${issue['Status']}</td>
@@ -78,7 +78,7 @@
               <table class="configtable">
                <tr>
                 <form action="searchit" method="get">
-                    <input type="hidden" name="type" value="storyarc">
+                    <input type="hidden" name="type" value="story_arc">
                     <input type="text" value="" placeholder="Search" onfocus="if(this.value==this.defaultValue)  this.value='';" name="name" />
                     <span class="mini-icon"></span>
                     <input type="submit" value="Search"/>

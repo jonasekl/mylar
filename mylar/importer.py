@@ -22,6 +22,7 @@ import re
 import urllib
 import urllib2
 import shutil
+import imghdr
 import sqlite3
 import cherrypy
 
@@ -43,7 +44,7 @@ def is_exists(comicid):
         return False
 
 
-def addComictoDB(comicid,mismatch=None,pullupd=None,imported=None,ogcname=None,calledfrom=None):
+def addComictoDB(comicid,mismatch=None,pullupd=None,imported=None,ogcname=None,calledfrom=None,annload=None,chkwant=None,issuechk=None,issuetype=None,latestissueinfo=None):
     # Putting this here to get around the circular import. Will try to use this to update images at later date.
 #    from mylar import cache
     
@@ -54,18 +55,25 @@ def addComictoDB(comicid,mismatch=None,pullupd=None,imported=None,ogcname=None,c
 
     controlValueDict = {"ComicID":     comicid}
 
-    dbcomic = myDB.action('SELECT * FROM comics WHERE ComicID=?', [comicid]).fetchone()
+    dbcomic = myDB.selectone('SELECT * FROM comics WHERE ComicID=?', [comicid]).fetchone()
     if dbcomic is None:
         newValueDict = {"ComicName":   "Comic ID: %s" % (comicid),
                 "Status":   "Loading"}
         comlocation = None
         oldcomversion = None
     else:
+        if chkwant is not None:
+            logger.fdebug('ComicID: ' + str(comicid) + ' already exists. Not adding from the future pull list at this time.')
+            return 'Exists'
         newValueDict = {"Status":   "Loading"}
         comlocation = dbcomic['ComicLocation']
+        if not latestissueinfo:
+            latestissueinfo = []
+            latestissueinfo.append({"latestiss": dbcomic['LatestIssue'],
+                                    "latestdate":  dbcomic['LatestDate']})
+
         filechecker.validateAndCreateDirectory(comlocation, True)
         oldcomversion = dbcomic['ComicVersion'] #store the comicversion and chk if it exists before hammering.
-
     myDB.upsert("comics", newValueDict, controlValueDict)
 
     #run the re-sortorder here in order to properly display the page
@@ -74,7 +82,7 @@ def addComictoDB(comicid,mismatch=None,pullupd=None,imported=None,ogcname=None,c
 
     # we need to lookup the info for the requested ComicID in full now        
     comic = cv.getComic(comicid,'comic')
-    #comic = myDB.action('SELECT * FROM comics WHERE ComicID=?', [comicid]).fetchone()
+
     if not comic:
         logger.warn('Error fetching comic. ID for : ' + comicid)
         if dbcomic is None:
@@ -110,7 +118,7 @@ def addComictoDB(comicid,mismatch=None,pullupd=None,imported=None,ogcname=None,c
                 #print ("gcdinfo:" + str(gcdinfo))
 
         elif mismatch == "yes":
-            CV_EXcomicid = myDB.action("SELECT * from exceptions WHERE ComicID=?", [comicid]).fetchone()
+            CV_EXcomicid = myDB.selectone("SELECT * from exceptions WHERE ComicID=?", [comicid])
             if CV_EXcomicid['variloop'] is None: pass
             else:
                 vari_loop = CV_EXcomicid['variloop']
@@ -121,7 +129,6 @@ def addComictoDB(comicid,mismatch=None,pullupd=None,imported=None,ogcname=None,c
                 #if vari_loop == '99':
                 gcdinfo = parseit.GCDdetails(comseries=None, resultURL=resultURL, vari_loop=0, ComicID=comicid, TotalIssues=0, issvariation="no", resultPublished=None)
 
-    logger.info('Sucessfully retrieved details for ' + comic['ComicName'] )
     # print ("Series Published" + parseit.resultPublished)
 
     CV_NoYearGiven = "no"
@@ -141,8 +148,26 @@ def addComictoDB(comicid,mismatch=None,pullupd=None,imported=None,ogcname=None,c
     else:
         SeriesYear = comic['ComicYear']
 
+    logger.info('Sucessfully retrieved details for ' + comic['ComicName'] )
+
+    #since the weekly issue check could return either annuals or issues, let's initialize it here so it carries through properly.
+    weeklyissue_check = []
+
     #let's do the Annual check here.
     if mylar.ANNUALS_ON:
+        #we need to check first to see if there are pre-existing annuals that have been manually added, or else they'll get
+        #wiped out.
+        annualids = []   #to be used to make sure an ID isn't double-loaded 
+
+        if annload is None:
+            pass
+        else:
+            for manchk in annload:
+                if manchk['ReleaseComicID'] is not None or manchk['ReleaseComicID'] is not None:  #if it exists, then it's a pre-existing add. 
+                    #print str(manchk['ReleaseComicID']), comic['ComicName'], str(SeriesYear), str(comicid)
+                    manualAnnual(manchk['ReleaseComicID'], comic['ComicName'], SeriesYear, comicid)
+                annualids.append(manchk['ReleaseComicID'])                
+
         annualcomicname = re.sub('[\,\:]', '', comic['ComicName'])
 
 #----- CBDB (outdated)
@@ -175,34 +200,37 @@ def addComictoDB(comicid,mismatch=None,pullupd=None,imported=None,ogcname=None,c
             #else:
             #sresults = mb.findComic(annComicName, mode, issue=annissues, limityear=annualval['AnnualYear'])
             #print "annualyear: " + str(annualval['AnnualYear'])
-        logger.fdebug('annualyear:' + str(annualyear))
-        sresults = mb.findComic(annComicName, mode, issue=None)
-        logger.fdebug('sresults : ' + str(sresults))
+        logger.fdebug('[IMPORTER-ANNUAL] - Annual Year:' + str(annualyear))
+        sresults, explicit = mb.findComic(annComicName, mode, issue=None, explicit='all')#,explicit=True)
 
         type='comic'
 
         if len(sresults) == 1:
-            logger.fdebug('1 result')
+            logger.fdebug('[IMPORTER-ANNUAL] - 1 result')
         if len(sresults) > 0:
-            logger.fdebug('there are ' + str(len(sresults)) + ' results.')
+            logger.fdebug('[IMPORTER-ANNUAL] - there are ' + str(len(sresults)) + ' results.')
             num_res = 0
             while (num_res < len(sresults)):
                 sr = sresults[num_res]
-                #logger.fdebug("description:" + sr['description'])
+                logger.fdebug("description:" + sr['description'])
                 if 'paperback' in sr['description'] or 'collecting' in sr['description'] or 'reprints' in sr['description'] or 'collected' in sr['description']:
-                    logger.fdebug('tradeback/collected edition detected - skipping ' + str(sr['comicid']))
+                    logger.fdebug('[IMPORTER-ANNUAL] - tradeback/collected edition detected - skipping ' + str(sr['comicid']))
                 else:
                     if comicid in sr['description']:
-                        logger.fdebug(str(comicid) + ' found. Assuming it is part of the greater collection.')
+                        logger.fdebug('[IMPORTER-ANNUAL] - ' + str(comicid) + ' found. Assuming it is part of the greater collection.')
                         issueid = sr['comicid']
-                        logger.fdebug(str(issueid) + ' added to series list as an Annual')
+                        logger.fdebug('[IMPORTER-ANNUAL] - ' + str(issueid) + ' added to series list as an Annual')
+                        if issueid in annualids:
+                            logger.fdebug('[IMPORTER-ANNUAL] - ' + str(issueid) + ' already exists & was refreshed.')
+                            num_res+=1 # need to manually increment since not a for-next loop
+                            continue
                         issued = cv.getComic(issueid,'issue')
                         if len(issued) is None or len(issued) == 0:
-                            logger.fdebug('Could not find any annual information...')
+                            logger.fdebug('[IMPORTER-ANNUAL] - Could not find any annual information...')
                             pass
                         else:
                             n = 0
-                            logger.fdebug('there are ' + str(sr['issues']) + ' annuals in this series.')
+                            logger.fdebug('[IMPORTER-ANNUAL] - There are ' + str(sr['issues']) + ' annuals in this series.')
                             while (n < int(sr['issues'])):
                                 try:
                                    firstval = issued['issuechoice'][n]
@@ -213,33 +241,47 @@ def addComictoDB(comicid,mismatch=None,pullupd=None,imported=None,ogcname=None,c
                                 issnum = str(firstval['Issue_Number'])
                                 issname = cleanname
                                 issdate = str(firstval['Issue_Date'])
+                                stdate = str(firstval['Store_Date'])
+                                int_issnum = helpers.issuedigits(issnum)
                                 newCtrl = {"IssueID": issid}
-                                newVals = {"Issue_Number":    issnum,
-                                           "Int_IssueNumber": helpers.issuedigits(issnum),
-                                           "IssueDate":       issdate,
-                                           "IssueName":       issname,
-                                           "ComicID":         comicid,
-                                           "ComicName":       comic['ComicName'],
-                                           "Status":         "Skipped"}
+                                newVals = {"Issue_Number":     issnum,
+                                           "Int_IssueNumber":  int_issnum,
+                                           "IssueDate":        issdate,
+                                           "ReleaseDate":      stdate,
+                                           "IssueName":        issname,
+                                           "ComicID":          comicid,
+                                           "ComicName":        comic['ComicName'],
+                                           "ReleaseComicID":   re.sub('4050-','',firstval['Comic_ID']).strip(),
+                                           "ReleaseComicName": sr['name'],
+                                           "Status":           "Skipped"}
                                 myDB.upsert("annuals", newVals, newCtrl)
+
+                                if issuechk is not None and issuetype == 'annual':
+                                    logger.fdebug('[IMPORTER-ANNUAL] - Comparing annual ' + str(issuechk) + ' .. to .. ' + str(int_issnum))
+                                    if issuechk == int_issnum:
+                                        weeklyissue_check.append({"Int_IssueNumber":    int_issnum,
+                                                                  "Issue_Number":       issnum,
+                                                                  "IssueDate":          issdate,
+                                                                  "ReleaseDate":        stdate})
+
                                 n+=1
                 num_res+=1
 
         elif len(sresults) == 0 or len(sresults) is None:
-            logger.fdebug('no results, removing the year from the agenda and re-querying.')
-            sresults = mb.findComic(annComicName, mode, issue=None)
+            logger.fdebug('[IMPORTER-ANNUAL] - No results, removing the year from the agenda and re-querying.')
+            sresults, explicit = mb.findComic(annComicName, mode, issue=None)#, explicit=True)
             if len(sresults) == 1:
                 sr = sresults[0]
-                logger.fdebug(str(comicid) + ' found. Assuming it is part of the greater collection.')
+                logger.fdebug('[IMPORTER-ANNUAL] - ' + str(comicid) + ' found. Assuming it is part of the greater collection.')
             else:
                 resultset = 0
         else:
-            logger.fdebug('returning results to screen - more than one possibility')
+            logger.fdebug('[IMPORTER-ANNUAL] - Returning results to screen - more than one possibility')
             for sr in sresults:
                 if annualyear < sr['comicyear']:
-                    logger.fdebug(str(annualyear) + ' is less than ' + str(sr['comicyear']))
+                    logger.fdebug('[IMPORTER-ANNUAL] - ' + str(annualyear) + ' is less than ' + str(sr['comicyear']))
                 if int(sr['issues']) > (2013 - int(sr['comicyear'])):
-                    logger.fdebug('issue count is wrong')
+                    logger.fdebug('[IMPORTER-ANNUAL] - Issue count is wrong')
             
         #newCtrl = {"IssueID": issueid}
         #newVals = {"Issue_Number":  annualval['AnnualIssue'],
@@ -254,28 +296,12 @@ def addComictoDB(comicid,mismatch=None,pullupd=None,imported=None,ogcname=None,c
     #comic book location on machine
     # setup default location here
 
-    if comlocation is None:
-        # let's remove the non-standard characters here.
-        u_comicnm = comic['ComicName']
-        u_comicname = u_comicnm.encode('ascii', 'ignore').strip()
-        dirbad = [':',',','/','?','!','\''] #in u_comicname or '/' in u_comicname or ',' in u_comicname or '?' in u_comicname:
-        comicdir = u_comicname
-        for dbd in dirbad:
-            if dbd in u_comicname:
-                if dbd == '/': repthechar = '-'
-                else: repthechar = ''
-                comicdir = comicdir.replace(dbd,repthechar)     
-#            if ':' in comicdir:
-#                comicdir = comicdir.replace(dbd,'')
-#            if '/' in comicdir:
-#                comicdir = comicdir.replace('/','-')
-#            if ',' in comicdir:
-#                comicdir = comicdir.replace(',','')
-#            if '?' in comicdir:
-#                comicdir = comicdir.replace('?','')
-#            if '!' in comicdir:
-#                comicdir = comicdir.replace('!','')
+    u_comicnm = comic['ComicName']
+    # let's remove the non-standard characters here that will break filenaming / searching.
+    comicname_filesafe = helpers.filesafe(u_comicnm)
 
+    if comlocation is None:
+        comicdir = comicname_filesafe
         series = comicdir
         publisher = re.sub('!','',comic['ComicPublisher']) # thanks Boom!
         year = SeriesYear
@@ -372,11 +398,27 @@ def addComictoDB(comicid,mismatch=None,pullupd=None,imported=None,ogcname=None,c
         with open(coverfile, 'wb') as the_file:
             the_file.write(com_image)
 
+        try:
+            logger.info('Image header check: ' + imghdr.what(coverfile))
+        except:
+            logger.info('image is corrupted.')
+            raise Exception
         logger.info('Successfully retrieved cover for ' + comic['ComicName'])
 
     except Exception, e:
         logger.warn('[%s] Error fetching data using : %s' % (e, comic['ComicImage']))
+        logger.info('Attempting to use alternate image size to get cover.')
+        try:
+            cimage = re.sub('[\+]','%20', comic['ComicImageALT'])
+            request = urllib2.Request(cimage)
+            response = urllib2.urlopen(request)
+            com_image = response.read()
+            with open(coverfile, 'wb') as the_file:
+                the_file.write(com_image)
 
+            logger.info('Successfully retrieved cover for ' + comic['ComicName'])
+        except Exception, e:
+            logger.warn('[%s] Error fetching data using : %s' % (e, comic['ComicImageALT']))        
 
     PRComicImage = os.path.join('cache',str(comicid) + ".jpg")
     ComicImage = helpers.replacetheslash(PRComicImage)
@@ -389,9 +431,9 @@ def addComictoDB(comicid,mismatch=None,pullupd=None,imported=None,ogcname=None,c
     if mylar.COMIC_COVER_LOCAL:
         try:
             comiclocal = os.path.join(comlocation,'cover.jpg')
-            shutil.copy(ComicImage,comiclocal)
+            shutil.copy(coverfile,comiclocal)
         except IOError as e:
-            logger.error('Unable to save cover into series directory at this time.')
+            logger.error('Unable to save cover (' + str(coverfile) + ') into series directory (' + str(comiclocal) + ') at this time.')
 
     if oldcomversion is None or oldcomversion == "None":
         logger.info('previous version detected as None - seeing if update required')
@@ -412,6 +454,7 @@ def addComictoDB(comicid,mismatch=None,pullupd=None,imported=None,ogcname=None,c
     controlValueDict = {"ComicID":      comicid}
     newValueDict = {"ComicName":        comic['ComicName'],
                     "ComicSortName":    sortname,
+                    "ComicName_Filesafe": comicname_filesafe,
                     "ComicYear":        SeriesYear,
                     "ComicImage":       ComicImage,
                     "Total":            comicIssues,
@@ -435,382 +478,17 @@ def addComictoDB(comicid,mismatch=None,pullupd=None,imported=None,ogcname=None,c
     if CV_NoYearGiven == 'no':
         #if set to 'no' then we haven't pulled down the issues, otherwise we did it already
         issued = cv.getComic(comicid,'issue')
+        if issued is None:
+            logger.warn('Unable to retrieve data from ComicVine. Get your own API key already!')
+            return
     logger.info('Sucessfully retrieved issue details for ' + comic['ComicName'] )
-    n = 0
-    iscnt = int(comicIssues)
-    issid = []
-    issnum = []
-    issname = []
-    issdate = []
-    issuedata = []
-    int_issnum = []
-    #let's start issue #'s at 0 -- thanks to DC for the new 52 reboot! :)
-    latestiss = "0"
-    latestdate = "0000-00-00"
-    firstiss = "10000000"
-    firstdate = "2099-00-00"
-    #print ("total issues:" + str(iscnt))
-    #---removed NEW code here---
-    logger.info('Now adding/updating issues for ' + comic['ComicName'])
 
-    if not mylar.CV_ONLY:
-        #fccnt = int(fc['comiccount'])
-        #logger.info(u"Found " + str(fccnt) + "/" + str(iscnt) + " issues of " + comic['ComicName'] + "...verifying")
-        #fcnew = []
-        if iscnt > 0: #if a series is brand new, it wont have any issues/details yet so skip this part
-            while (n <= iscnt):
-            #---NEW.code
-                try:
-                    firstval = issued['issuechoice'][n]
-                except IndexError:
-                    break
-                cleanname = helpers.cleanName(firstval['Issue_Name'])
-                issid = str(firstval['Issue_ID'])
-                issnum = str(firstval['Issue_Number'])
-                #print ("issnum: " + str(issnum))
-                issname = cleanname
-                if '.' in str(issnum):
-                    issn_st = str(issnum).find('.')
-                    issn_b4dec = str(issnum)[:issn_st]
-                    #if the length of decimal is only 1 digit, assume it's a tenth
-                    dec_is = str(issnum)[issn_st + 1:]
-                    if len(dec_is) == 1:
-                        dec_nisval = int(dec_is) * 10
-                        iss_naftdec = str(dec_nisval)
-                    if len(dec_is) == 2:
-                        dec_nisval = int(dec_is)
-                        iss_naftdec = str(dec_nisval)
-                    iss_issue = issn_b4dec + "." + iss_naftdec
-                    issis = (int(issn_b4dec) * 1000) + dec_nisval
-                elif 'au' in issnum.lower():
-                    print ("au detected")
-                    stau = issnum.lower().find('au')
-                    issnum_au = issnum[:stau] 
-                    print ("issnum_au: " + str(issnum_au))
-                    #account for Age of Ultron mucked up numbering
-                    issis = str(int(issnum_au) * 1000) + 'AU'
-                else: issis = int(issnum) * 1000
-
-                bb = 0
-                while (bb <= iscnt):
-                    try: 
-                        gcdval = gcdinfo['gcdchoice'][bb]
-                        #print ("gcdval: " + str(gcdval))
-                    except IndexError:
-                        #account for gcd variation here
-                        if gcdinfo['gcdvariation'] == 'gcd':
-                            #logger.fdebug("gcd-variation accounted for.")
-                            issdate = '0000-00-00'
-                            int_issnum =  int ( issis / 1000 )
-                        break
-                    if 'nn' in str(gcdval['GCDIssue']):
-                        #no number detected - GN, TP or the like
-                        logger.warn('Non Series detected (Graphic Novel, etc) - cannot proceed at this time.')
-                        updater.no_searchresults(comicid)
-                        return
-                    elif 'au' in gcdval['GCDIssue'].lower():
-                        #account for Age of Ultron mucked up numbering - this is in format of 5AU.00
-                        gstau = gcdval['GCDIssue'].lower().find('au')
-                        gcdis_au = gcdval['GCDIssue'][:gstau]
-                        gcdis = str(int(gcdis_au) * 1000) + 'AU'
-                    elif '.' in str(gcdval['GCDIssue']):
-                        #logger.fdebug("g-issue:" + str(gcdval['GCDIssue']))
-                        issst = str(gcdval['GCDIssue']).find('.')
-                        #logger.fdebug("issst:" + str(issst))
-                        issb4dec = str(gcdval['GCDIssue'])[:issst]
-                        #logger.fdebug("issb4dec:" + str(issb4dec))
-                        #if the length of decimal is only 1 digit, assume it's a tenth
-                        decis = str(gcdval['GCDIssue'])[issst+1:]
-                        #logger.fdebug("decis:" + str(decis))
-                        if len(decis) == 1:
-                            decisval = int(decis) * 10
-                            issaftdec = str(decisval)
-                        if len(decis) == 2:
-                            decisval = int(decis)
-                            issaftdec = str(decisval)
-                        gcd_issue = issb4dec + "." + issaftdec
-                        #logger.fdebug("gcd_issue:" + str(gcd_issue))
-                        try:
-                            gcdis = (int(issb4dec) * 1000) + decisval
-                        except ValueError:
-                            logger.error('This has no issue # for me to get - Either a Graphic Novel or one-shot. This feature to allow these will be added in the near future.')
-                            updater.no_searchresults(comicid)
-                            return
-                    else:
-                        gcdis = int(str(gcdval['GCDIssue'])) * 1000
-                    if gcdis == issis:
-                        issdate = str(gcdval['GCDDate'])
-                        if str(issis).isdigit():
-                            int_issnum = int( gcdis / 1000 )
-                        else:
-                            if 'au' in issis.lower():
-                                int_issnum = str(int(gcdis[:-2]) / 1000) + 'AU'
-                            else:
-                                logger.error('this has an alpha-numeric in the issue # which I cannot account for. Get on github and log the issue for evilhero.')
-                                return
-                        #get the latest issue / date using the date.
-                        if gcdval['GCDDate'] > latestdate:
-                            latestiss = str(issnum)
-                            latestdate = str(gcdval['GCDDate'])
-                            break
-                       #bb = iscnt
-                    bb+=1
-                #print("(" + str(n) + ") IssueID: " + str(issid) + " IssueNo: " + str(issnum) + " Date" + str(issdate))
-                #---END.NEW.
-
-                # check if the issue already exists
-                iss_exists = myDB.action('SELECT * from issues WHERE IssueID=?', [issid]).fetchone()
-
-                # Only change the status & add DateAdded if the issue is already in the database
-                if iss_exists is None:
-                    newValueDict['DateAdded'] = helpers.today()
-
-                controlValueDict = {"IssueID":  issid}
-                newValueDict = {"ComicID":            comicid,
-                                "ComicName":          comic['ComicName'],
-                                "IssueName":          issname,
-                                "Issue_Number":       issnum,
-                                "IssueDate":          issdate,
-                                "Int_IssueNumber":    int_issnum
-                                }        
-                if mylar.AUTOWANT_ALL:
-                    newValueDict['Status'] = "Wanted"
-                elif issdate > helpers.today() and mylar.AUTOWANT_UPCOMING:
-                    newValueDict['Status'] = "Wanted"
-                else:
-                    newValueDict['Status'] = "Skipped"
-
-                if iss_exists:
-                    #print ("Existing status : " + str(iss_exists['Status']))
-                    newValueDict['Status'] = iss_exists['Status']     
-            
-                try:     
-                    myDB.upsert("issues", newValueDict, controlValueDict)
-                except sqlite3.InterfaceError, e:
-                    #raise sqlite3.InterfaceError(e)
-                    logger.error('MAJOR error trying to get issue data, this is most likey a MULTI-VOLUME series and you need to use the custom_exceptions.csv file.')
-                    myDB.action("DELETE FROM comics WHERE ComicID=?", [comicid])
-                    return
-                n+=1
-
-#        logger.debug(u"Updating comic cache for " + comic['ComicName'])
-#        cache.getThumb(ComicID=issue['issueid'])
-            
-#        logger.debug(u"Updating cache for: " + comic['ComicName'])
-#        cache.getThumb(ComicIDcomicid)
-    else:
-       if iscnt > 0: #if a series is brand new, it wont have any issues/details yet so skip this part
-            while (n <= iscnt):
-            #---NEW.code
-                try:
-                    firstval = issued['issuechoice'][n]
-                    #print firstval
-                except IndexError:
-                    break
-                cleanname = helpers.cleanName(firstval['Issue_Name'])
-                issid = str(firstval['Issue_ID'])
-                issnum = firstval['Issue_Number']
-                #print ("issnum: " + str(issnum))
-                issname = cleanname
-                issdate = str(firstval['Issue_Date'])
-                if issnum.isdigit():
-                    int_issnum = int( issnum ) * 1000
-                else:
-                    if 'a.i.' in issnum.lower(): issnum = re.sub('\.', '', issnum)
-                    #print str(issnum)
-                    if 'au' in issnum.lower():
-                        int_issnum = (int(issnum[:-2]) * 1000) + ord('a') + ord('u')
-#                    elif 'ai' in issnum.lower():
-#                        int_issnum = (int(issnum[:-2]) * 1000) + ord('a') + ord('i')
-#                        print "ai:"  + str(int_issnum)
-                    elif 'inh' in issnum.lower():
-                        int_issnum = (int(issnum[:-4]) * 1000) + ord('i') + ord('n') + ord('h')
-                    elif 'now' in issnum.lower():
-                        int_issnum = (int(issnum[:-4]) * 1000) + ord('n') + ord('o') + ord('w')
-                    elif u'\xbd' in issnum:
-                        issnum = .5
-                        int_issnum = int(issnum) * 1000
-                    elif u'\xbc' in issnum:
-                        issnum = .25
-                        int_issnum = int(issnum) * 1000
-                    elif u'\xbe' in issnum:
-                        issnum = .75
-                        int_issnum = int(issnum) * 1000
-                    elif u'\u221e' in issnum:
-                        #issnum = utf-8 will encode the infinity symbol without any help
-                        int_issnum = 9999999999 * 1000  # set 9999999999 for integer value of issue
-                    elif '.' in issnum or ',' in issnum:
-                        if ',' in issnum: issnum = re.sub(',','.', issnum)
-                        issst = str(issnum).find('.')
-                        #logger.fdebug("issst:" + str(issst))
-                        issb4dec = str(issnum)[:issst]
-                        #logger.fdebug("issb4dec:" + str(issb4dec))
-                        #if the length of decimal is only 1 digit, assume it's a tenth
-                        decis = str(issnum)[issst+1:]
-                        #logger.fdebug("decis:" + str(decis))
-                        if len(decis) == 1:
-                            decisval = int(decis) * 10
-                            issaftdec = str(decisval)
-                        elif len(decis) == 2:
-                            decisval = int(decis)
-                            issaftdec = str(decisval)
-                        else:
-                            decisval = decis
-                            issaftdec = str(decisval)
-                        try:
-#                            int_issnum = str(issnum)
-                            int_issnum = (int(issb4dec) * 1000) + (int(issaftdec) * 10)
-                        except ValueError:
-                            logger.error('This has no issue # for me to get - Either a Graphic Novel or one-shot.')
-                            updater.no_searchresults(comicid)
-                            return
-                    else:
-                        try:
-                            x = float(issnum)
-                            #validity check
-                            if x < 0:
-                                logger.info('I have encountered a negative issue #: ' + str(issnum) + '. Trying to accomodate.')
-                                logger.fdebug('value of x is : ' + str(x))
-                                int_issnum = (int(x)*1000) - 1
-                            else: raise ValueError
-                        except ValueError, e:
-                            x = 0
-                            tstord = None
-                            issno = None
-                            invchk = "false"
-                            while (x < len(issnum)):
-                                if issnum[x].isalpha():
-                                    #take first occurance of alpha in string and carry it through
-                                    tstord = issnum[x:].rstrip()
-                                    issno = issnum[:x].rstrip()
-                                    try:
-                                        isschk = float(issno)
-                                    except ValueError, e:
-                                        logger.fdebug('invalid numeric for issue - cannot be found. Ignoring.')
-                                        issno = None
-                                        tstord = None
-                                        invchk = "true"
-                                    break
-                                x+=1
-                            if tstord is not None and issno is not None:
-                                logger.fdebug('tstord: ' + str(tstord))
-                                a = 0
-                                ordtot = 0
-                                while (a < len(tstord)):
-                                    ordtot += ord(tstord[a].lower())  #lower-case the letters for simplicty
-                                    a+=1
-                                logger.fdebug('issno: ' + str(issno))
-                                int_issnum = (int(issno) * 1000) + ordtot
-                                logger.fdebug('intissnum : ' + str(int_issnum))
-                            elif invchk == "true":
-                                logger.fdebug('this does not have an issue # that I can parse properly.')
-                                return
-                            else:
-                                logger.error(str(issnum) + ' this has an alpha-numeric in the issue # which I cannot account for.')
-                                return    
-                #get the latest issue / date using the date.
-                #logger.info('latest date: ' + str(latestdate))
-                #logger.info('first date: ' + str(firstdate))
-                #logger.info('issue date: ' + str(firstval['Issue_Date']))
-                if firstval['Issue_Date'] > latestdate:
-                    latestiss = issnum
-                    latestdate = str(firstval['Issue_Date'])
-                if firstval['Issue_Date'] < firstdate:
-                    firstiss = issnum
-                    firstdate = str(firstval['Issue_Date'])
-#--moved to lower function.
-#                # check if the issue already exists
-#                iss_exists = myDB.action('SELECT * from issues WHERE IssueID=?', [issid]).fetchone()
-
-#                # Only change the status & add DateAdded if the issue is already in the database
-#                if iss_exists is None:
-#                    newValueDict['DateAdded'] = helpers.today()
-
-#                controlValueDict = {"IssueID":  issid}
-#                newValueDict = {"ComicID":            comicid,
-#                                "ComicName":          comic['ComicName'],
-#                                "IssueName":          issname,
-#                                "Issue_Number":       issnum,
-#                                "IssueDate":          issdate,
-#                                "Int_IssueNumber":    int_issnum
-#                                }
-
-                issuedata.append({"ComicID":            comicid,
-                                  "IssueID":            issid,
-                                  "ComicName":          comic['ComicName'],
-                                  "IssueName":          issname,
-                                  "Issue_Number":       issnum,
-                                  "IssueDate":          issdate,
-                                  "Int_IssueNumber":    int_issnum})
-
-                #logger.info('issuedata: ' + str(issuedata))
-#--moved to lower function
-#                if iss_exists:
-#                    print ("Existing status : " + str(iss_exists['Status']))
-#                    newValueDict['Status'] = iss_exists['Status']
-#                else:
-#                    print "issue doesn't exist in db."
-#                    if mylar.AUTOWANT_ALL:
-#                        newValueDict['Status'] = "Wanted"
-#                    elif issdate > helpers.today() and mylar.AUTOWANT_UPCOMING:
-#                        newValueDict['Status'] = "Wanted"
-#                    else:
-#                        newValueDict['Status'] = "Skipped"
-
-#                try:
-#                    myDB.upsert("issues", newValueDict, controlValueDict)
-#                except sqlite3.InterfaceError, e:
-#                    #raise sqlite3.InterfaceError(e)
-#                    logger.error('Something went wrong - I cannot add the issue information into my DB.')
-#                    myDB.action("DELETE FROM comics WHERE ComicID=?", [comicid])
-#                    return
-
-                n+=1
-
-    if len(issuedata) > 1 and not calledfrom  == 'dbupdate':  
-        logger.fdebug('initiating issue updating - info & status')
-        issue_collection(issuedata,nostatus='False')
-    else:
-        logger.fdebug('initiating issue updating - just the info')
-        issue_collection(issuedata,nostatus='True')
-
-    #figure publish dates here...
-    styear = str(SeriesYear)
-    #if SeriesYear == '0000':
-    #    styear = firstdate[:4]        
-    if firstdate[5:7] == '00': 
-        stmonth = "?"
-    else:
-        stmonth = helpers.fullmonth(firstdate[5:7])
-    ltyear = re.sub('/s','', latestdate[:4])
-    if latestdate[5:7] == '00':
-        ltmonth = "?"
-    else:
-        ltmonth = helpers.fullmonth(latestdate[5:7])
-
-    #try to determine if it's an 'actively' published comic from above dates
-    #threshold is if it's within a month (<55 days) let's assume it's recent.
-    c_date = datetime.date(int(latestdate[:4]),int(latestdate[5:7]),1)
-    n_date = datetime.date.today()
-    recentchk = (n_date - c_date).days
-    #print ("recentchk: " + str(recentchk))
-    if recentchk <= 55:
-        lastpubdate = 'Present'
-    else:
-        lastpubdate = str(ltmonth) + ' ' + str(ltyear)
-
-    publishfigure = str(stmonth) + ' ' + str(styear) + ' - ' + str(lastpubdate)
-
-    controlValueStat = {"ComicID":     comicid}
-    
-    newValueStat = {"Status":          "Active",
-                    "LatestIssue":     latestiss,
-                    "LatestDate":      latestdate,
-                    "ComicPublished":  publishfigure,
-                    "LastUpdated":     helpers.now()
-                   }
-
-    myDB.upsert("comics", newValueStat, controlValueStat)
+    #move to own function so can call independently to only refresh issue data
+    #issued is from cv.getComic, comic['ComicName'] & comicid would both be already known to do independent call.    
+    issuedata = updateissuedata(comicid, comic['ComicName'], issued, comicIssues, calledfrom, SeriesYear=SeriesYear, latestissueinfo=latestissueinfo)
+    if issuedata is None:
+        logger.warn('Unable to complete Refreshing / Adding issue data - this WILL create future problems if not addressed.')
+        return
 
     if mylar.CVINFO or (mylar.CV_ONLY and mylar.CVINFO):
         if not os.path.exists(os.path.join(comlocation,"cvinfo")) or mylar.CV_ONETIMER:
@@ -819,8 +497,27 @@ def addComictoDB(comicid,mismatch=None,pullupd=None,imported=None,ogcname=None,c
   
     logger.info('Updating complete for: ' + comic['ComicName'])
 
-    #move the files...if imported is not empty (meaning it's not from the mass importer.)
-    if imported is None or imported == 'None':
+    if calledfrom == 'weekly':
+        logger.info('Successfully refreshed ' + comic['ComicName'] + ' (' + str(SeriesYear) + '). Returning to Weekly issue comparison.')
+        logger.info('Update issuedata for ' + str(issuechk) + ' of : ' + str(weeklyissue_check))
+        return issuedata # this should be the weeklyissue_check data from updateissuedata function
+
+    elif calledfrom == 'dbupdate':
+        logger.info('returning to dbupdate module')
+        return #issuedata # this should be the issuedata data from updateissuedata function
+
+    elif calledfrom == 'weeklycheck':
+        logger.info('Successfully refreshed ' + comic['ComicName'] + ' (' + str(SeriesYear) + '). Returning to Weekly issue update.')
+        return  #no need to return any data here.
+
+
+    #if it made it here, then the issuedata contains dates, let's pull the data now.
+    latestiss = issuedata['LatestIssue']
+    latestdate = issuedata['LatestDate']
+    lastpubdate = issuedata['LastPubDate']
+
+    #move the files...if imported is not empty & not futurecheck (meaning it's not from the mass importer.)
+    if imported is None or imported == 'None' or imported == 'futurecheck':
         pass
     else:
         if mylar.IMP_MOVE:
@@ -830,27 +527,27 @@ def addComictoDB(comicid,mismatch=None,pullupd=None,imported=None,ogcname=None,c
             logger.info('Mass import - Moving not Enabled. Setting Archived Status for import.')
             moveit.archivefiles(comicid,ogcname)
 
-    if calledfrom == 'dbupdate':
-        logger.info('returning to dbupdate module')
-        return
-
     #check for existing files...
-    statbefore = myDB.action("SELECT * FROM issues WHERE ComicID=? AND Issue_Number=?", [comicid,str(latestiss)]).fetchone()
-    logger.fdebug('issue: ' + str(latestiss) + ' status before chk :' + statbefore['Status'])    
+    statbefore = myDB.selectone("SELECT * FROM issues WHERE ComicID=? AND Issue_Number=?", [comicid,str(latestiss)]).fetchone()
+    logger.fdebug('issue: ' + str(latestiss) + ' status before chk :' + str(statbefore['Status']))
     updater.forceRescan(comicid)
-    statafter = myDB.action("SELECT * FROM issues WHERE ComicID=? AND Issue_Number=?", [comicid,str(latestiss)]).fetchone()
-    logger.fdebug('issue: ' + str(latestiss) + ' status after chk :' + statafter['Status'])
+    statafter = myDB.selectone("SELECT * FROM issues WHERE ComicID=? AND Issue_Number=?", [comicid,str(latestiss)]).fetchone()
+    logger.fdebug('issue: ' + str(latestiss) + ' status after chk :' + str(statafter['Status']))
 
     if pullupd is None:
     # lets' check the pullist for anything at this time as well since we're here.
     # do this for only Present comics....
         if mylar.AUTOWANT_UPCOMING and lastpubdate == 'Present': #and 'Present' in gcdinfo['resultPublished']:
             logger.fdebug('latestissue: #' + str(latestiss))
-            chkstats = myDB.action("SELECT * FROM issues WHERE ComicID=? AND Issue_Number=?", [comicid,str(latestiss)]).fetchone()
+            chkstats = myDB.selectone("SELECT * FROM issues WHERE ComicID=? AND Issue_Number=?", [comicid,str(latestiss)]).fetchone()
             logger.fdebug('latestissue status: ' + chkstats['Status'])
-            if chkstats['Status'] == 'Skipped' or chkstats['Status'] == 'Wanted': # or chkstats['Status'] == 'Snatched':
+            if chkstats['Status'] == 'Skipped' or chkstats['Status'] == 'Wanted' or chkstats['Status'] == 'Snatched':
                 logger.info('Checking this week pullist for new issues of ' + comic['ComicName'])
-                updater.newpullcheck(comic['ComicName'], comicid)
+                if comic['ComicName'] != comicname_filesafe:
+                    cn_pull = comicname_filesafe
+                else: 
+                    cn_pull = comic['ComicName']
+                updater.newpullcheck(cn_pull, comicid, issue=latestiss)
 
         #here we grab issues that have been marked as wanted above...
   
@@ -868,6 +565,31 @@ def addComictoDB(comicid,mismatch=None,pullupd=None,imported=None,ogcname=None,c
             else:
                 logger.info('Already have the latest issue : #' + str(latestiss))
 
+    if chkwant is not None:
+        #if this isn't None, this is being called from the futureupcoming list
+        #a new series was added automagically, but it has more than 1 issue (probably because it was a back-dated issue)
+        #the chkwant is a tuple containing all the data for the given series' issues that were marked as Wanted for futureupcoming dates.
+        chkresults = myDB.select("SELECT * FROM issues WHERE ComicID=? AND Status='Skipped'", [comicid])
+        if chkresults:
+            logger.info('[FROM THE FUTURE CHECKLIST] Attempting to grab wanted issues for : ' + comic['ComicName'])
+            for result in chkresults:
+                for chkit in chkwant:
+                    logger.fdebug('checking ' + str(chkit['IssueNumber']) + ' against ' + str(result['Issue_Number']))
+                    if chkit['IssueNumber'] == result['Issue_Number']:
+                        logger.fdebug('Searching for : ' + str(result['Issue_Number']))
+                        logger.fdebug('Status of : ' + str(result['Status']))
+                        search.searchforissue(result['IssueID'])
+        else: logger.info('No issues marked as wanted for ' + comic['ComicName'])
+
+        logger.info('Finished grabbing what I could.')
+
+    if imported == 'futurecheck':
+        logger.info('Returning to Future-Check module to complete the add & remove entry.')
+        return 
+
+    if calledfrom == 'addbyid':
+        logger.info('Sucessfully added ' + comic['ComicName'] + ' (' + str(SeriesYear) + ') by directly using the ComicVine ID')
+        return
 
 def GCDimport(gcomicid, pullupd=None,imported=None,ogcname=None):
     # this is for importing via GCD only and not using CV.
@@ -885,7 +607,7 @@ def GCDimport(gcomicid, pullupd=None,imported=None,ogcname=None):
 
     controlValueDict = {"ComicID":     gcdcomicid}
 
-    comic = myDB.action('SELECT ComicName, ComicYear, Total, ComicPublished, ComicImage, ComicLocation, ComicPublisher FROM comics WHERE ComicID=?', [gcomicid]).fetchone()
+    comic = myDB.selectone('SELECT ComicName, ComicYear, Total, ComicPublished, ComicImage, ComicLocation, ComicPublisher FROM comics WHERE ComicID=?', [gcomicid]).fetchone()
     ComicName = comic[0]
     ComicYear = comic[1]
     ComicIssues = comic[2]
@@ -1111,7 +833,7 @@ def GCDimport(gcomicid, pullupd=None,imported=None,ogcname=None):
         #---END.NEW.
 
         # check if the issue already exists
-        iss_exists = myDB.action('SELECT * from issues WHERE IssueID=?', [issid]).fetchone()
+        iss_exists = myDB.selectone('SELECT * from issues WHERE IssueID=?', [issid]).fetchone()
 
 
         # Only change the status & add DateAdded if the issue is not already in the database
@@ -1212,6 +934,9 @@ def GCDimport(gcomicid, pullupd=None,imported=None,ogcname=None):
 def issue_collection(issuedata,nostatus):
     myDB = db.DBConnection()
 
+    nowdate = datetime.datetime.now()
+    nowtime = nowdate.strftime("%Y%m%d")
+
     if issuedata:    
         for issue in issuedata:
 
@@ -1222,32 +947,37 @@ def issue_collection(issuedata,nostatus):
                             "IssueName":          issue['IssueName'],
                             "Issue_Number":       issue['Issue_Number'],
                             "IssueDate":          issue['IssueDate'],
+                            "ReleaseDate":        issue['ReleaseDate'],
                             "Int_IssueNumber":    issue['Int_IssueNumber']
+                            #"Status":             "Skipped"  #set this to Skipped by default to avoid NULL entries.
                             }
 
+            # check if the issue already exists
+            iss_exists = myDB.selectone('SELECT * from issues WHERE IssueID=?', [issue['IssueID']]).fetchone()
 
             if nostatus == 'False':
-                # check if the issue already exists
-                iss_exists = myDB.action('SELECT * from issues WHERE IssueID=?', [issue['IssueID']]).fetchone()
 
                 # Only change the status & add DateAdded if the issue is already in the database
                 if iss_exists is None:
                     newValueDict['DateAdded'] = helpers.today()
-                    #print "issue doesn't exist in db."
+                    datechk = re.sub('-','', issue['ReleaseDate']).strip() # converts date to 20140718 format
+                    #logger.fdebug('issue #' + str(issue['Issue_Number']) + 'does not exist in db.')
                     if mylar.AUTOWANT_ALL:
                         newValueDict['Status'] = "Wanted"
-                    elif issue['IssueDate'] > helpers.today() and mylar.AUTOWANT_UPCOMING:
+                        #logger.fdebug('autowant all')
+                    elif int(datechk) >= int(nowtime) and mylar.AUTOWANT_UPCOMING:
+                        #logger.fdebug(str(datechk) + ' >= ' + str(nowtime))
                         newValueDict['Status'] = "Wanted"
                     else:
                         newValueDict['Status'] = "Skipped"
-
+                    #logger.fdebug('status is : ' + str(newValueDict))
                 else:
-                    #print ("Existing status : " + str(iss_exists['Status']))
+                    #logger.fdebug('Existing status for issue #' + str(issue['Issue_Number']) + ' : ' + str(iss_exists['Status']))
                     newValueDict['Status'] = iss_exists['Status']
 
             else:
-                #print ("Not changing the status at this time - reverting to previous module after to re-append existing status")
-                newValueDict['Status'] = "Skipped"
+                #logger.fdebug("Not changing the status at this time - reverting to previous module after to re-append existing status")
+                pass #newValueDict['Status'] = "Skipped"
 
             try:
                 myDB.upsert("issues", newValueDict, controlValueDict)
@@ -1257,3 +987,325 @@ def issue_collection(issuedata,nostatus):
                 myDB.action("DELETE FROM comics WHERE ComicID=?", [issue['ComicID']])
                 return
 
+
+def manualAnnual(manual_comicid, comicname, comicyear, comicid):
+        #called when importing/refreshing an annual that was manually added.
+        myDB = db.DBConnection()
+        issueid = manual_comicid
+        logger.fdebug(str(issueid) + ' added to series list as an Annual')
+        sr = cv.getComic(manual_comicid, 'comic')
+        logger.info('Attempting to integrate ' + sr['ComicName'] + ' (' + str(issueid) + ') to the existing series of ' + comicname + '(' + str(comicyear) + ')')
+        if len(sr) is None or len(sr) == 0:
+            logger.fdebug('Could not find any information on the series indicated : ' + str(manual_comicid))
+            return
+        else:
+            n = 0
+            noissues = sr['ComicIssues']
+            logger.fdebug('there are ' + str(noissues) + ' annuals within this series.')
+            issued = cv.getComic(re.sub('4050-','',manual_comicid).strip(),'issue')
+            while (n < int(noissues)):
+                try:
+                    firstval = issued['issuechoice'][n]
+                except IndexError:
+                    break
+                cleanname = helpers.cleanName(firstval['Issue_Name'])
+                issid = str(firstval['Issue_ID'])
+                issnum = str(firstval['Issue_Number'])
+                issname = cleanname
+                issdate = str(firstval['Issue_Date'])
+                stdate = str(firstval['Store_Date'])
+                logger.fdebug('comicname:' + str(comicname))
+                logger.fdebug('comicid:' + str(comicid))
+                logger.fdebug('issid:' + str(issid))
+                logger.fdebug('cleanname:' + str(cleanname))
+                logger.fdebug('issnum:' + str(issnum))
+                logger.fdebug('issdate:' + str(issdate))
+                logger.fdebug('stdate:' + str(stdate))
+                newCtrl = {"IssueID": issid}
+                newVals = {"Issue_Number":     issnum,
+                           "Int_IssueNumber":  helpers.issuedigits(issnum),
+                           "IssueDate":        issdate,
+                           "ReleaseDate":      stdate,
+                           "IssueName":        issname,
+                           "ComicID":          comicid,   #this is the series ID
+                           "ReleaseComicID":   re.sub('4050-','',manual_comicid).strip(),  #this is the series ID for the annual(s)
+                           "ComicName":        comicname, #series ComicName
+                           "ReleaseComicName" :sr['ComicName'], #series ComicName for the manual_comicid
+                           "Status":          "Skipped"}
+                           #need to add in the values for the new series to be added.
+                           #"M_ComicName":    sr['ComicName'],
+                           #"M_ComicID":      manual_comicid}
+                myDB.upsert("annuals", newVals, newCtrl)
+                n+=1
+        logger.info('Successfully integrated ' + str(n) + ' issues of ' + sr['ComicName'] + ' to the series: ' + comicname)
+        return
+
+
+def updateissuedata(comicid, comicname=None, issued=None, comicIssues=None, calledfrom=None, issuechk=None, issuetype=None, SeriesYear=None, latestissueinfo=None):
+    weeklyissue_check = []
+    logger.fdebug('issuedata call references...')
+    logger.fdebug('comicid:' + str(comicid))
+    logger.fdebug('comicname:' + comicname)
+    logger.fdebug('comicissues:' + str(comicIssues))
+    logger.fdebug('calledfrom: ' + str(calledfrom))
+    logger.fdebug('issuechk: ' + str(issuechk))
+    logger.fdebug('latestissueinfo: ' + str(latestissueinfo))
+    logger.fdebug('issuetype: ' + str(issuetype))
+    #to facilitate independent calls to updateissuedata ONLY, account for data not available and get it.
+    #chkType comes from the weeklypulllist - either 'annual' or not to distinguish annuals vs. issues
+    if comicIssues is None:
+        comic = cv.getComic(comicid,'comic')
+        if comic is None:
+            logger.warn('Error retrieving from ComicVine - either the site is down or you are not using your own CV API key')
+            return
+        if comicIssues is None:
+            comicIssues = comic['ComicIssues']
+        if SeriesYear is None:
+            SeriesYear = comic['ComicYear']
+        if comicname is None:
+            comicname = comic['ComicName']
+    if issued is None:
+        issued = cv.getComic(comicid,'issue')
+        if issued is None:
+            logger.warn('Error retrieving from ComicVine - either the site is down or you are not using your own CV API key')
+            return
+    n = 0
+    iscnt = int(comicIssues)
+    issid = []
+    issnum = []
+    issname = []
+    issdate = []
+    issuedata = []
+    int_issnum = []
+    #let's start issue #'s at 0 -- thanks to DC for the new 52 reboot! :)
+    latestiss = "0"
+    latestdate = "0000-00-00"
+    firstiss = "10000000"
+    firstdate = "2099-00-00"
+    #print ("total issues:" + str(iscnt))
+    logger.info('Now adding/updating issues for ' + comicname)
+
+    if iscnt > 0: #if a series is brand new, it wont have any issues/details yet so skip this part
+        while (n <= iscnt):
+            try:
+                firstval = issued['issuechoice'][n]
+                #print firstval
+            except IndexError:
+                break
+            cleanname = helpers.cleanName(firstval['Issue_Name'])
+            issid = str(firstval['Issue_ID'])
+            issnum = firstval['Issue_Number']
+            #print ("issnum: " + str(issnum))
+            issname = cleanname
+            issdate = str(firstval['Issue_Date'])
+            storedate = str(firstval['Store_Date'])
+            if issnum.isdigit():
+                int_issnum = int( issnum ) * 1000
+            else:
+                if 'a.i.' in issnum.lower() or 'ai' in issnum.lower(): 
+                    issnum = re.sub('\.', '', issnum)
+                    #int_issnum = (int(issnum[:-2]) * 1000) + ord('a') + ord('i')
+                if 'au' in issnum.lower():
+                    int_issnum = (int(issnum[:-2]) * 1000) + ord('a') + ord('u')
+                elif 'inh' in issnum.lower():
+                    int_issnum = (int(issnum[:-4]) * 1000) + ord('i') + ord('n') + ord('h')
+                elif 'now' in issnum.lower():
+                    int_issnum = (int(issnum[:-4]) * 1000) + ord('n') + ord('o') + ord('w')
+                elif u'\xbd' in issnum:
+                    int_issnum = .5 * 1000
+                    logger.info('1/2 issue detected :' + issnum + ' === ' + str(int_issnum))
+                elif u'\xbc' in issnum:
+                    int_issnum = .25 * 1000
+                elif u'\xbe' in issnum:
+                    int_issnum = .75 * 1000
+                elif u'\u221e' in issnum:
+                    #issnum = utf-8 will encode the infinity symbol without any help
+                    int_issnum = 9999999999 * 1000  # set 9999999999 for integer value of issue
+                elif '.' in issnum or ',' in issnum:
+                    if ',' in issnum: issnum = re.sub(',','.', issnum)
+                    issst = str(issnum).find('.')
+                    #logger.fdebug("issst:" + str(issst))
+                    if issst == 0:
+                        issb4dec = 0
+                    else:
+                        issb4dec = str(issnum)[:issst]
+                    #logger.fdebug("issb4dec:" + str(issb4dec))
+                    #if the length of decimal is only 1 digit, assume it's a tenth
+                    decis = str(issnum)[issst+1:]
+                    #logger.fdebug("decis:" + str(decis))
+                    if len(decis) == 1:
+                        decisval = int(decis) * 10
+                        issaftdec = str(decisval)
+                    elif len(decis) == 2:
+                        decisval = int(decis)
+                        issaftdec = str(decisval)
+                    else:
+                        decisval = decis
+                        issaftdec = str(decisval)
+                    try:
+#                        int_issnum = str(issnum)
+                        int_issnum = (int(issb4dec) * 1000) + (int(issaftdec) * 10)
+                    except ValueError:
+                        logger.error('This has no issue # for me to get - Either a Graphic Novel or one-shot.')
+                        updater.no_searchresults(comicid)
+                        return
+                else:
+                    try:
+                        x = float(issnum)
+                        #validity check
+                        if x < 0:
+                            logger.info('I have encountered a negative issue #: ' + str(issnum) + '. Trying to accomodate.')
+                            logger.fdebug('value of x is : ' + str(x))
+                            int_issnum = (int(x)*1000) - 1
+                        else: raise ValueError
+                    except ValueError, e:
+                        x = 0
+                        tstord = None
+                        issno = None
+                        invchk = "false"
+                        while (x < len(issnum)):
+                            if issnum[x].isalpha():
+                                #take first occurance of alpha in string and carry it through
+                                tstord = issnum[x:].rstrip()
+                                issno = issnum[:x].rstrip()
+                                try:
+                                    isschk = float(issno)
+                                except ValueError, e:
+                                    if len(issnum) == 1 and issnum.isalpha():
+                                        logger.fdebug('detected lone alpha issue. Attempting to figure this out.')
+                                        break
+                                    logger.fdebug('invalid numeric for issue - cannot be found. Ignoring.')
+                                    issno = None
+                                    tstord = None
+                                    invchk = "true"
+                                break
+                            x+=1
+                        if tstord is not None and issno is not None:
+                            a = 0
+                            ordtot = 0
+                            if len(issnum) == 1 and issnum.isalpha():
+                                int_issnum = ord(tstord.lower())
+                            else:
+                                while (a < len(tstord)):
+                                    ordtot += ord(tstord[a].lower())  #lower-case the letters for simplicty
+                                    a+=1
+                                int_issnum = (int(issno) * 1000) + ordtot
+                        elif invchk == "true":
+                            logger.fdebug('this does not have an issue # that I can parse properly.')
+                            return
+                        else:
+                            logger.error(str(issnum) + ' this has an alpha-numeric in the issue # which I cannot account for.')
+                            return
+            #get the latest issue / date using the date.
+            #logger.fdebug('issue : ' + str(issnum))
+            #logger.fdebug('latest date: ' + str(latestdate))
+            #logger.fdebug('first date: ' + str(firstdate))
+            #logger.fdebug('issue date: ' + str(firstval['Issue_Date']))
+            if firstval['Issue_Date'] >= latestdate:
+                #logger.fdebug('date check hit for issue date > latestdate')
+                if int_issnum > helpers.issuedigits(latestiss):
+                    #logger.fdebug('assigning latest issue to : ' + str(issnum))
+                    latestiss = issnum
+                latestdate = str(firstval['Issue_Date'])
+            if firstval['Issue_Date'] < firstdate:
+                firstiss = issnum
+                firstdate = str(firstval['Issue_Date'])
+
+            if issuechk is not None and issuetype == 'series':
+                logger.fdebug('comparing ' + str(issuechk) + ' .. to .. ' + str(int_issnum))
+                if issuechk == int_issnum:
+                    weeklyissue_check.append({"Int_IssueNumber":    int_issnum,
+                                              "Issue_Number":       issnum,
+                                              "IssueDate":          issdate,
+                                              "ReleaseDate":        storedate})
+
+            issuedata.append({"ComicID":            comicid,
+                              "IssueID":            issid,
+                              "ComicName":          comicname,
+                              "IssueName":          issname,
+                              "Issue_Number":       issnum,
+                              "IssueDate":          issdate,
+                              "ReleaseDate":        storedate,
+                              "Int_IssueNumber":    int_issnum})
+
+            n+=1
+
+    if calledfrom == 'futurecheck' and len(issuedata) == 0:
+        logger.fdebug('This is a NEW series with no issue data - skipping issue updating for now, and assigning generic information so things don\'t break')
+        latestdate = latestissueinfo[0]['latestdate']   # if it's from futurecheck, issuechk holds the latestdate for the given issue
+        latestiss = latestissueinfo[0]['latestiss']
+        lastpubdate = 'Present'
+        publishfigure = str(SeriesYear) + ' - ' + str(lastpubdate)
+    else:
+        if len(issuedata) > 1 and not calledfrom  == 'dbupdate':
+            logger.fdebug('initiating issue updating - info & status')
+            issue_collection(issuedata,nostatus='False')
+        else:
+            logger.fdebug('initiating issue updating - just the info')
+            issue_collection(issuedata,nostatus='True')
+
+        styear = str(SeriesYear)
+
+        if firstdate[5:7] == '00':
+            stmonth = "?"
+        else:
+            stmonth = helpers.fullmonth(firstdate[5:7])
+
+        ltyear = re.sub('/s','', latestdate[:4])
+        if latestdate[5:7] == '00':
+            ltmonth = "?"
+        else:
+            ltmonth = helpers.fullmonth(latestdate[5:7])
+
+        #try to determine if it's an 'actively' published comic from above dates
+        #threshold is if it's within a month (<55 days) let's assume it's recent.
+        try:
+            c_date = datetime.date(int(latestdate[:4]),int(latestdate[5:7]),1)
+        except:
+            logger.error('Cannot determine Latest Date for given series. This is most likely due to an issue having a date of : 0000-00-00')
+            latestdate = str(SeriesYear) + '-01-01'
+            logger.error('Setting Latest Date to be ' + str(latestdate) + '. You should inform CV that the issue data is stale.')
+            c_date = datetime.date(int(latestdate[:4]),int(latestdate[5:7]),1)
+
+        n_date = datetime.date.today()
+        recentchk = (n_date - c_date).days
+        
+        if recentchk <= 55:
+            lastpubdate = 'Present'
+        else:
+            lastpubdate = str(ltmonth) + ' ' + str(ltyear)
+
+        publishfigure = str(stmonth) + ' ' + str(styear) + ' - ' + str(lastpubdate)
+        if stmonth == '?' and styear == '?' and lastpubdate =='0000' and comicIssues == '0':
+            logger.info('No available issue data - I believe this is a NEW series.')
+            latestdate = latestissueinfo[0]['latestdate']
+            latestiss = latestissueinfo[0]['latestiss']
+            lastpubdate = 'Present'
+            publishfigure = str(SeriesYear) + ' - ' + str(lastpubdate)
+            
+
+
+    controlValueStat = {"ComicID":     comicid}
+
+    newValueStat = {"Status":          "Active",
+                    "ComicPublished":  publishfigure,
+                    "LatestIssue":     latestiss,
+                    "LatestDate":      latestdate,
+                    "LastUpdated":     helpers.now()
+                   }
+
+    myDB = db.DBConnection()
+    myDB.upsert("comics", newValueStat, controlValueStat)
+
+    importantdates = {}
+    importantdates['LatestIssue'] = latestiss
+    importantdates['LatestDate'] = latestdate
+    importantdates['LastPubDate'] = lastpubdate
+
+    if calledfrom == 'weekly':
+        return weeklyissue_check
+
+    elif calledfrom == 'dbupdate':
+        return issuedata
+
+    return importantdates

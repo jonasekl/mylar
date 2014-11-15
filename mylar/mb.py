@@ -15,6 +15,7 @@
 
 from __future__ import with_statement
 
+import re
 import time
 import threading
 import urllib, urllib2
@@ -22,15 +23,30 @@ from xml.dom.minidom import parseString, Element
 
 import mylar
 from mylar import logger, db, cv
-from mylar.helpers import multikeysort, replace_all, cleanName
+from mylar.helpers import multikeysort, replace_all, cleanName, cvapi_check
 
 mb_lock = threading.Lock()
 
 
-def pullsearch(comicapi,comicquery,offset):
+def pullsearch(comicapi,comicquery,offset,explicit,type):
     u_comicquery = urllib.quote(comicquery.encode('utf-8').strip())
-    PULLURL = mylar.CVURL + 'search?api_key=' + str(comicapi) + '&resources=volume&query=' + u_comicquery + '&field_list=id,name,start_year,site_detail_url,count_of_issues,image,publisher,description&format=xml&page=' + str(offset)
+    u_comicquery = u_comicquery.replace(" ", "%20")
+
+    if explicit == 'all' or explicit == 'loose':
+        PULLURL = mylar.CVURL + 'search?api_key=' + str(comicapi) + '&resources=' + str(type) + '&query=' + u_comicquery + '&field_list=id,name,start_year,site_detail_url,count_of_issues,image,publisher,description&format=xml&page=' + str(offset)
+
+    else:
+        # 02/22/2014 use the volume filter label to get the right results.
+        # add the 's' to the end of type to pluralize the caption (it's needed)
+        if type == 'story_arc':
+            logger.info('redefining.')
+            u_comicquery = re.sub("%20AND%20", "%20", u_comicquery)
+        PULLURL = mylar.CVURL + str(type) + 's?api_key=' + str(comicapi) + '&filter=name:' + u_comicquery + '&field_list=id,name,start_year,site_detail_url,count_of_issues,image,publisher,description&format=xml&offset=' + str(offset) # 2012/22/02 - CVAPI flipped back to offset instead of page
+
     #all these imports are standard on most modern python implementations
+    #CV API Check here.
+    if mylar.CVAPI_COUNT == 0 or mylar.CVAPI_COUNT >= mylar.CVAPI_MAX:
+        cvapi_check()
     #download the file:
     try:
         file = urllib2.urlopen(PULLURL)
@@ -38,6 +54,8 @@ def pullsearch(comicapi,comicquery,offset):
         logger.error('err : ' + str(err))
         logger.error("There was a major problem retrieving data from ComicVine - on their end. You'll have to try again later most likely.")
         return        
+    #increment CV API counter.
+    mylar.CVAPI_COUNT +=1
     #convert to string:
     data = file.read()
     #close file because we dont need it anymore:
@@ -46,7 +64,7 @@ def pullsearch(comicapi,comicquery,offset):
     dom = parseString(data)
     return dom
 
-def findComic(name, mode, issue, limityear=None):
+def findComic(name, mode, issue, limityear=None, explicit=None, type=None):
 
     #with mb_lock:       
     comiclist = []
@@ -58,27 +76,58 @@ def findComic(name, mode, issue, limityear=None):
 
     #print ("limityear: " + str(limityear))            
     if limityear is None: limityear = 'None'
-
+    
+    comicquery = name
     #comicquery=name.replace(" ", "%20")
-    comicquery=name.replace(" ", " AND ")
-    comicapi='583939a3df0a25fc4e8b7a29934a13078002dc27'
-    offset = 1
+
+    if explicit is None:
+        #logger.fdebug('explicit is None. Setting to Default mode of ALL search words.')
+        #comicquery=name.replace(" ", " AND ")
+        explicit = 'all'
+
+    #OR
+    if explicit == 'loose':
+        logger.fdebug('Changing to loose mode - this will match ANY of the search words')
+        comicquery = name.replace(" ", " OR ")
+    elif explicit == 'explicit':
+        logger.fdebug('Changing to explicit mode - this will match explicitly on the EXACT words')
+        comicquery=name.replace(" ", " AND ")
+    else:
+        logger.fdebug('Default search mode - this will match on ALL search words')
+        comicquery = name.replace(" ", " AND ")
+        explicit = 'all'
+
+
+    if mylar.COMICVINE_API == 'None' or mylar.COMICVINE_API is None or mylar.COMICVINE_API == mylar.DEFAULT_CVAPI:
+        logger.warn('You have not specified your own ComicVine API key - alot of things will be limited. Get your own @ http://api.comicvine.com.')
+        comicapi = mylar.DEFAULT_CVAPI
+    else:
+        comicapi = mylar.COMICVINE_API
+
+    if type is None:
+        type = 'volume'
 
     #let's find out how many results we get from the query...    
-    searched = pullsearch(comicapi,comicquery,1)
+    searched = pullsearch(comicapi,comicquery,0,explicit,type)
     if searched is None: return False
     totalResults = searched.getElementsByTagName('number_of_total_results')[0].firstChild.wholeText
-    #print ("there are " + str(totalResults) + " search results...")
+    logger.fdebug("there are " + str(totalResults) + " search results...")
     if not totalResults:
         return False
     countResults = 0
     while (countResults < int(totalResults)):
-        #print ("querying " + str(countResults))
+        #logger.fdebug("querying " + str(countResults))
         if countResults > 0:
-            #new api - have to change to page # instead of offset count
-            offsetcount = (countResults/100) + 1
-            searched = pullsearch(comicapi,comicquery,offsetcount)
-        comicResults = searched.getElementsByTagName('volume')
+            #2012/22/02 - CV API flipped back to offset usage instead of page 
+            if explicit == 'all' or explicit == 'loose':
+                #all / loose uses page for offset
+                offsetcount = (countResults/100) + 1
+            else:
+                #explicit uses offset
+                offsetcount = countResults
+            
+            searched = pullsearch(comicapi,comicquery,offsetcount,explicit,type)
+        comicResults = searched.getElementsByTagName(type) #('volume')
         body = ''
         n = 0        
         if not comicResults:
@@ -132,9 +181,9 @@ def findComic(name, mode, issue, limityear=None):
                                 'description':          xmldesc
                                 })
                     else:
-                        print ("year: " + str(xmlYr) + " -  contraint not met. Has to be within " + str(limityear)) 
+                        logger.fdebug('year: ' + str(xmlYr) + ' -  contraint not met. Has to be within ' + str(limityear)) 
                 n+=1    
         #search results are limited to 100 and by pagination now...let's account for this.
         countResults = countResults + 100
    
-    return comiclist
+    return comiclist, explicit
